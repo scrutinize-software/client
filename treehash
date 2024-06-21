@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+
+import hashlib
+import os
+import stat
+import sys
+
+def get_sha1(data: bytes) -> bytes:
+  """Compute the SHA-1 hash of the given data."""
+  sha1 = hashlib.sha1()
+  sha1.update(data)
+  return sha1.digest()
+
+def read_file(path: str) -> bytes:
+  """Read the content of a file."""
+  with open(path, 'rb') as f:
+    return f.read()
+
+def get_file_mode(path: str) -> str:
+  """Get the file mode in octal string format."""
+  st = os.stat(path)
+  if stat.S_ISREG(st.st_mode):
+    return '100644' if st.st_mode & 0o111 == 0 else '100755'  # regular or executable file
+  elif stat.S_ISLNK(st.st_mode):
+    return '120000'  # symbolic link
+  elif stat.S_ISDIR(st.st_mode):
+    return '040000'  # directory
+  else:
+    raise ValueError(f"Unsupported file type: {path}")
+
+def compute_blob_hash(file_path: str) -> bytes:
+  """Compute the Git blob hash for a given file."""
+  file_content = read_file(file_path)
+  header = f'blob {len(file_content)}\0'.encode()
+  data = header + file_content
+  return get_sha1(data)
+
+def ignore_path(entry_path: str) -> bool:
+  if ".git" in entry_path:
+    return True
+  if ".egg-info" in entry_path:
+    return True
+  return False
+
+def generate_tree_hash(directory: str, level: int = 0) -> bytes:
+  entries: List[Tuple[str, str, bytes]] = []
+
+  for entry in os.listdir(directory):
+    entry_path = os.path.join(directory, entry)
+    print(f"Entry Path: {entry_path}")
+    entry_name = entry.replace(os.path.sep, '/')
+    file_mode = get_file_mode(entry_path)
+
+    # If path is ignored we should move to the next on
+    if ignore_path(entry_path):
+      continue
+
+    if os.path.isdir(entry_path):
+      # Recursively generate tree hash for subdirectory
+        subtree_hash = generate_tree_hash(entry_path, level + 1)
+        e = (file_mode, entry_name, subtree_hash)
+        entries.append(e)
+    elif os.path.isfile(entry_path) or os.path.islink(entry_path):
+      # Generate hash for file or symlink
+        file_hash = compute_blob_hash(entry_path)
+        e = (file_mode, entry_name, file_hash)
+        entries.append(e)
+
+  # Sort entries
+  entries.sort(key=lambda entry: entry[1].encode('utf-8'))
+
+  if (level == 0):
+    for entry in entries:
+      mode, entry_name, entry_hash = entry
+      type = "blob"
+      if mode == "040000":
+        type = "tree"
+      print(f"{mode} {type} {entry_hash.hex()}\t{entry_name}")
+
+  # Create tree object content
+  tree_content = b''
+  for entry in entries:
+    file_mode, entry_name, entry_hash = entry
+    # tree_content += f'{file_mode} {entry_name}\0{entry_hash}'.encode()
+    tree_content += f'{file_mode} {entry_name}\0'.encode() + entry_hash
+
+  # Prefix with header
+  header = f'tree {len(tree_content)}\0'.encode()
+  full_content = header + tree_content
+  tree_hash = get_sha1(full_content)
+  print(f'Directory: {directory}, Tree Hash: {tree_hash.hex()}')
+  return tree_hash
+
+# Example usage:
+tree_hash = generate_tree_hash(sys.argv[1])
+# print(f'040000 tree {tree_hash}\t{sys.argv[1]}')
+print(f"Tree Hash: {tree_hash.hex()}")
